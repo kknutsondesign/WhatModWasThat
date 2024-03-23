@@ -1,0 +1,13 @@
+{
+  "PlayStyles": [],
+  "WorldConfigAttributes": [
+    {
+      "DataType": 4,
+      "Category": "saveTest",
+      "Code": "Whatmod-Last-Loaded-Mods",
+      "OnCustomizeScreen": false,
+      "Default": "this is default",
+      "OnlyDuringWorldCreate": false
+    }
+  ]
+}
