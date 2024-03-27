@@ -4,12 +4,15 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ProtoBuf;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Config;
+using Vintagestory.API.Datastructures;
 using Vintagestory.API.Server;
 using Vintagestory.API.Util;
+using Vintagestory.GameContent;
 using System.Text.Encodings;
 using System.Text;
 using System.Net;
@@ -24,6 +27,11 @@ using System.Reflection.Emit;
 
 namespace WhatModWasThat
 {
+    /*** TODO
+     * Add folders/tags for mass management
+     * Add auto settings for different ModDB tags
+     * Hack together some way to do 1-click installs from inside world
+     */
     public class WhatModWasThatModSystem : ModSystem
     {
         [Serializable]
@@ -37,13 +45,16 @@ namespace WhatModWasThat
             public string latestVersion { get; set; }
 
             //flags
-            [NonSerialized]
-            public bool _wasChecked = false;
             public bool newMod { get; set; }
             public bool newVersion { get; set; }
             public bool hasNewVersion { get; set; }
             public bool removed { get; set; }
             public bool hidden {get; set;}
+
+            [NonSerialized]
+            public bool _wasChecked = false;
+            [NonSerialized]
+            public bool _wasRendered = false;
 
             public override string ToString()
             {
@@ -57,7 +68,17 @@ namespace WhatModWasThat
             }
         }
 
+        [ProtoContract(ImplicitFields = ImplicitFields.AllPublic)]
+        public class WhatMod_StateMessage {
+            public string message; 
+        }
+
         private ICoreServerAPI _api;
+        private ICoreClientAPI _capi;
+
+        private IServerNetworkChannel _serverChannel;
+        private IClientNetworkChannel _clientChannel;
+
         public Dictionary<string, OldMod> oldMods;
 
         private bool _renderNames;
@@ -65,6 +86,8 @@ namespace WhatModWasThat
         private bool _hideRemoved;
         private bool _unhideAdded;
         private bool _showNewVersionAvailable;
+
+        private GuiHandbookTextPage _whatPage;
 
         private Dictionary<string, string> flags = new Dictionary<string, string>();
 
@@ -76,12 +99,91 @@ namespace WhatModWasThat
             ["NeedsUpdate"] = "FFC43D",
             ["Removed"] = "EF478F"
         };
+        public override void StartClientSide(ICoreClientAPI api) //TODO: Send and Recieve clipboard packet? Then handle with capi.Forms.SetClipboard
+        {
+            _capi = api;
+            _clientChannel = api.Network.RegisterChannel("whatmod") .RegisterMessageType<WhatMod_StateMessage>()
+                                                                    .SetMessageHandler<WhatMod_StateMessage>(OnStateMessage);
+
+            api.ModLoader.GetModSystem<ModSystemSurvivalHandbook>(true).OnInitCustomPages += this.ModSystemWhatMod_OnInitCustomPages;
+            api.ChatCommands.Create("redo").HandleWith((args) => { return RandomText(args); });
+            
+            foreach(var kv in _capi.LinkProtocols)
+            {
+                api.Logger.Notification(kv.Key);
+            }
+
+            base.StartClientSide(api);
+        }
+
+        private void ModSystemWhatMod_OnInitCustomPages(List<GuiHandbookPage> pages)
+        {
+            _whatPage = new GuiHandbookTextPage();
+            _whatPage.Title = "What Mod Manager";
+            _whatPage.Text = "Whoops, not loaded yet";
+            _whatPage.pageCode = "whatmod-root";
+            _whatPage.Init(_capi);
+
+            pages.Add(_whatPage);
+        }
+
+        private void OnStateMessage(WhatMod_StateMessage message)
+        {
+            //Message from server with new tooltip render
+            //Store locally 
+            //Rebuild handbook -> Seperate step for language support
+            //¯\_(ツ)_/¯
+            //Reload handbook page
+            _whatPage.Text = AddHandbookElements(message.message);
+            _whatPage.Init(_capi);
+            reloadHandbook();
+        }
+
+        private string AddHandbookElements(string tooltip)
+        {
+            var lines = tooltip.Split("<br>");
+
+            for (int i=0;i<lines.Length;i++)
+            {
+                lines[i] += "   =)";
+                var match = Regex.Match(lines[i], @"modid=(.+?)/");
+                if (match.Success)
+                {
+                    var modid = match.Groups[1].Value;
+                    lines[i] += $"    <a href=\"command:///whatmod hide {modid}\">Hide</a>";
+                }
+            }
+            
+            return String.Join("<br>",lines);
+        }
+
+        private TextCommandResult RandomText(TextCommandCallingArgs args)
+        {
+            var text = " test page text ";
+            _whatPage.Text = text;
+            _whatPage.Init(_capi); //Reinit page so the richtext elements get reparsed   //lazy
+            reloadHandbook();
+
+            return TextCommandResult.Success(text);
+        }
+        private void reloadHandbook()
+        {
+            GuiDialogHandbook guiDialogHandbook = _capi.Gui.OpenedGuis.FirstOrDefault((GuiDialog dlg) => dlg is GuiDialogHandbook) as GuiDialogHandbook;
+            if (guiDialogHandbook == null)
+            {
+                return;
+            }
+            guiDialogHandbook.ReloadPage();
+        }
 
         public override void StartServerSide(ICoreServerAPI api)
         {
-
             base.StartServerSide(api);
             _api = api;
+
+            _serverChannel = _api.Network.RegisterChannel("whatmod").RegisterMessageType<WhatMod_StateMessage>();
+
+            api.Event.PlayerNowPlaying += (joinedPlayer) => { OnPlayerFinishedLoading(joinedPlayer); };
 
             try {
                 Initialize(api);
@@ -164,7 +266,13 @@ namespace WhatModWasThat
         }
         public override bool ShouldLoad(EnumAppSide side)
         {
-            return side == EnumAppSide.Server;
+            return true;
+            //return side == EnumAppSide.Server;
+        }
+
+        public void OnPlayerFinishedLoading(IServerPlayer joinedPlayer)
+        {
+            _serverChannel.SendPacket<WhatMod_StateMessage>(new WhatMod_StateMessage { message = RenderTooltip(_api) }, joinedPlayer);
         }
 
         public void RegisterCommands(ICoreServerAPI api)
@@ -602,10 +710,11 @@ namespace WhatModWasThat
             formattedVersion = formattedVersion.PadRight(longestVersion);
 
             //                           20chr - 8chr Symbol
-            lines.Add(String.Format("<meta sortCode={3} /><code>{0} - {1} {2}</code>",  formattedName,
+            lines.Add(String.Format("<meta sortCode={3} modid={4}/><code>{0} - {1} {2}</code>",  formattedName,
                                                                                         formattedVersion,
                                                                                         flag,
-                                                                                        sortCode));
+                                                                                        sortCode,
+                                                                                        mod.Value.modID));
         }
 
             lines.Sort();
@@ -677,6 +786,8 @@ namespace WhatModWasThat
             var tooltip = RenderTooltip(api);
             
             api.World.Config.SetString("Whatmod-Last-Loaded-Mods", tooltip);
+
+            _serverChannel.BroadcastPacket<WhatMod_StateMessage>(new WhatMod_StateMessage { message = tooltip });
         }
 
         //Should be handled more asyncly but meh

@@ -8,7 +8,8 @@
   ],
   "description": "A simple way to have your modlist bulit into a world save.",
   "version": "1.0.3",
-  "side": "Server",
+  "side": "Universal",
+  "requiredOnClient": false,
   "dependencies": {
     "game": ""
   }
